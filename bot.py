@@ -7,9 +7,9 @@ import io
 from flask import Flask
 import threading
 
-TOKEN = "YOUR_DISCORD_BOT_TOKEN"
-GUILD_ID = YOUR_GUILD_ID  # Replace with your Discord server ID
-TICKET_LOG_CHANNEL_ID = YOUR_LOG_CHANNEL_ID  # Replace with the ticket log channel ID
+TOKEN = "MTQzMjQ1MDc0NDQwNTE5Njg3Mw.GS1h8f.mvYdecGxfsjN301l1g1N-g8WBY9hwoR5qL_-_g"
+GUILD_ID = 1424815111541096530  # Replace with your Discord server ID
+TICKET_LOG_CHANNEL_ID = 1434241829733404692  # Replace with the ticket log channel ID
 
 intents = discord.Intents.default()
 intents.message_content = True
