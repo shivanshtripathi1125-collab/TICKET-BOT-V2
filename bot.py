@@ -2,7 +2,6 @@ import os
 import json
 import asyncio
 import datetime
-import io
 import threading
 from flask import Flask
 import discord
@@ -53,11 +52,55 @@ def cooldown_expired(user_id: int):
     return (datetime.datetime.utcnow() - cooldowns[user_id]).total_seconds() >= 86400
 
 
-async def create_transcript(channel):
-    transcript = ""
-    async for msg in channel.history(limit=None, oldest_first=True):
-        transcript += f"[{msg.created_at.strftime('%Y-%m-%d %H:%M:%S')}] {msg.author}: {msg.content}\n"
-    return io.StringIO(transcript)
+async def create_transcript_embed(channel: discord.TextChannel, user: discord.User, created_at: datetime.datetime):
+    """Return a beautiful Discord Embed transcript summary."""
+    messages = [msg async for msg in channel.history(limit=100, oldest_first=True)]
+    total_messages = len(messages)
+
+    transcript_text = ""
+    for msg in messages:
+        clean = msg.content.replace("`", "'")
+        transcript_text += f"**{msg.author.display_name}:** {clean}\n"
+
+    if len(transcript_text) > 4000:
+        transcript_text = transcript_text[-4000:]  # keep last 4000 chars
+
+    closed_at = datetime.datetime.utcnow()
+    duration = closed_at - created_at
+    duration_str = str(datetime.timedelta(seconds=int(duration.total_seconds())))
+
+    embed = discord.Embed(
+        title=f"📜 Ticket Transcript — {channel.name}",
+        color=discord.Color.gold(),
+        timestamp=closed_at
+    )
+    embed.add_field(
+        name="👤 Ticket Owner",
+        value=f"{user.mention}\n(ID: `{user.id}`)",
+        inline=False
+    )
+    embed.add_field(
+        name="🕒 Opened",
+        value=created_at.strftime('%Y-%m-%d %H:%M:%S UTC'),
+        inline=True
+    )
+    embed.add_field(
+        name="🔒 Closed",
+        value=closed_at.strftime('%Y-%m-%d %H:%M:%S UTC'),
+        inline=True
+    )
+    embed.add_field(
+        name="💬 Messages",
+        value=f"{total_messages} total messages",
+        inline=True
+    )
+    embed.add_field(
+        name="🧾 Conversation Summary",
+        value=transcript_text or "_(No messages found)_",
+        inline=False
+    )
+    embed.set_footer(text=f"Ticket Duration: {duration_str} | Powered by Your Server")
+    return embed
 
 
 # ======================================================
@@ -89,22 +132,25 @@ async def ticket(interaction: discord.Interaction):
     channel = await guild.create_text_channel(f"ticket-{user.name}", category=category, overwrites=overwrites)
 
     cooldowns[user.id] = datetime.datetime.utcnow()
-    tickets[channel.id] = user.id
+    tickets[channel.id] = {
+        "user_id": user.id,
+        "created_at": datetime.datetime.utcnow()
+    }
 
     embed = discord.Embed(
         title="🎟️ Welcome to Your Ticket!",
         description=(
             f"Hello {user.mention}! 👋\n\n"
-            "Thank you for reaching out to our support.\n\n"
-            "Here are the **Premium Apps** we currently provide:\n"
-            "💠 Spotify\n"
-            "💠 YouTube\n"
-            "💠 Kinemaster\n"
-            "💠 Hotstar\n"
-            "💠 Truecaller\n"
-            "💠 Castle\n\n"
-            "_More apps will come soon!_\n\n"
-            "To get started, please type the **name** of the app you want below 👇"
+            "Welcome to your personal support ticket.\n"
+            "Here’s what we currently offer:\n\n"
+            "💠 **Spotify**\n"
+            "💠 **YouTube**\n"
+            "💠 **Kinemaster**\n"
+            "💠 **Hotstar**\n"
+            "💠 **Truecaller**\n"
+            "💠 **Castle**\n\n"
+            "_More premium apps are coming soon!_\n\n"
+            "👉 Please type the **name** of the app you want below."
         ),
         color=discord.Color.green(),
         timestamp=datetime.datetime.utcnow()
@@ -148,7 +194,7 @@ async def on_message(message):
 
 
 # ----------------------------------------------------------
-# /send_app (Enhanced)
+# /send_app Command
 # ----------------------------------------------------------
 @bot.tree.command(name="send_app", description="Send the verified app link to a user (Admin only)")
 @app_commands.describe(user="User to send the app to", app_name="Name of the app")
@@ -167,10 +213,9 @@ async def send_app(interaction: discord.Interaction, user: discord.User, app_nam
         title=f"🎉 Your {app_name.capitalize()} Download Link",
         description=(
             f"Thank you for verifying your subscription! ❤️\n\n"
-            f"Click the button below to download your app:\n\n"
+            f"Click below to download your app:\n\n"
             f"[🔗 **Download {app_name.capitalize()}**]({app_link})\n\n"
-            "Please confirm that everything is working fine.\n"
-            "When you're done, press the **Close Ticket** button below."
+            "When you're done, please close the ticket using the button below."
         ),
         color=discord.Color.green(),
         timestamp=datetime.datetime.utcnow()
@@ -183,14 +228,12 @@ async def send_app(interaction: discord.Interaction, user: discord.User, app_nam
             f"✅ Sent **{app_name.capitalize()}** link to {user.mention}", ephemeral=True
         )
 
-        # Send in ticket channel as well
         view = CloseTicketButton(user)
         await interaction.channel.send(
-            content=f"{user.mention}, here's your app link confirmation.",
+            content=f"{user.mention}, here’s your verified app link!",
             embed=embed,
             view=view
         )
-
     except discord.Forbidden:
         await interaction.response.send_message(f"⚠️ Can't DM {user.mention}.", ephemeral=True)
 
@@ -221,12 +264,12 @@ async def view_tickets(interaction: discord.Interaction):
     if not tickets:
         await interaction.response.send_message("📭 No open tickets.", ephemeral=True)
     else:
-        msg = "\n".join([f"<#{cid}> — <@{uid}>" for cid, uid in tickets.items()])
+        msg = "\n".join([f"<#{cid}> — <@{info['user_id']}>" for cid, info in tickets.items()])
         await interaction.response.send_message(f"🎟️ **Open Tickets:**\n{msg}", ephemeral=True)
 
 
 # ----------------------------------------------------------
-# Close Ticket Button
+# Close Ticket Button (Enhanced Transcript)
 # ----------------------------------------------------------
 class CloseTicketButton(discord.ui.View):
     def __init__(self, user):
@@ -242,12 +285,18 @@ class CloseTicketButton(discord.ui.View):
         await interaction.response.send_message("🕒 This ticket will close in **5 seconds...**", ephemeral=True)
         await asyncio.sleep(5)
 
-        transcript_file = await create_transcript(interaction.channel)
-        file = discord.File(transcript_file, filename=f"transcript-{interaction.channel.name}.txt")
+        info = tickets.pop(interaction.channel.id, None)
+        if info:
+            user = interaction.guild.get_member(info["user_id"])
+            created_at = info["created_at"]
+        else:
+            user = interaction.user
+            created_at = datetime.datetime.utcnow()
 
+        embed_transcript = await create_transcript_embed(interaction.channel, user, created_at)
         log_channel = bot.get_channel(TICKET_LOG_CHANNEL_ID)
         if log_channel:
-            await log_channel.send(f"🗂️ Transcript for `{interaction.channel.name}`", file=file)
+            await log_channel.send(embed=embed_transcript)
 
         await interaction.channel.delete()
 
