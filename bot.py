@@ -1,5 +1,6 @@
+import os
 import discord
-from discord.ext import commands, tasks
+from discord.ext import commands
 from discord import app_commands
 import asyncio
 import datetime
@@ -7,10 +8,12 @@ import io
 from flask import Flask
 import threading
 
-TOKEN = "MTQzMjQ1MDc0NDQwNTE5Njg3Mw.GS1h8f.mvYdecGxfsjN301l1g1N-g8WBY9hwoR5qL_-_g"
-GUILD_ID = 1424815111541096530  # Replace with your Discord server ID
-TICKET_LOG_CHANNEL_ID = 1434241829733404692  # Replace with the ticket log channel ID
+# ---- Load Environment Variables ----
+TOKEN = os.getenv("DISCORD_TOKEN")
+GUILD_ID = int(os.getenv("GUILD_ID"))
+TICKET_LOG_CHANNEL_ID = int(os.getenv("TICKET_LOG_CHANNEL_ID"))
 
+# ---- Discord Bot Setup ----
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
@@ -20,12 +23,12 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 cooldowns = {}
 tickets = {}
 
-# Flask server to keep bot alive
+# ---- Flask Server ----
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Bot is running!"
+    return "✅ Bot is running and alive!"
 
 def run_flask():
     app.run(host="0.0.0.0", port=8080)
@@ -154,14 +157,13 @@ async def view_tickets(interaction: discord.Interaction):
         msg = "\n".join([f"<#{ch}> — <@{uid}>" for ch, uid in tickets.items()])
         await interaction.response.send_message(f"🎟️ **Open Tickets:**\n{msg}", ephemeral=True)
 
-# ---- Bot Events ----
+# ---- Bot Ready ----
 @bot.event
 async def on_ready():
     print(f"✅ Logged in as {bot.user}")
     await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
     print("✅ Slash commands synced.")
 
-# Start Flask in background
+# ---- Run Flask + Bot ----
 threading.Thread(target=run_flask).start()
-
 bot.run(TOKEN)
