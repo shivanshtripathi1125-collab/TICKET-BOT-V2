@@ -1,4 +1,5 @@
 import os
+import json
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -7,19 +8,29 @@ import datetime
 import io
 from flask import Flask
 import threading
+from dotenv import load_dotenv
 
-# ---- Load Environment Variables ----
+load_dotenv()
+
+# ---- Environment Variables ----
 TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = int(os.getenv("GUILD_ID"))
 TICKET_LOG_CHANNEL_ID = int(os.getenv("TICKET_LOG_CHANNEL_ID"))
+YOUTUBE_CHANNEL_URL = os.getenv("YOUTUBE_CHANNEL_URL")  # 👈 Add this to your .env
 
-# ---- Discord Bot Setup ----
+# ---- Load App Links ----
+def load_apps():
+    with open("apps.json", "r") as f:
+        return json.load(f)
+
+apps_data = load_apps()
+
+# ---- Discord Setup ----
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
-
 cooldowns = {}
 tickets = {}
 
@@ -28,18 +39,18 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "✅ Bot is running and alive!"
+    return "✅ Bot is alive!"
 
 def run_flask():
     app.run(host="0.0.0.0", port=8080)
 
-# ---- Utility ----
+# ---- Cooldown Helper ----
 def cooldown_expired(user_id):
     if user_id not in cooldowns:
         return True
     return (datetime.datetime.utcnow() - cooldowns[user_id]).total_seconds() >= 86400
 
-# ---- Ticket Command ----
+# ---- /ticket Command ----
 @bot.tree.command(name="ticket", description="Create a new support ticket.")
 async def ticket(interaction: discord.Interaction):
     user = interaction.user
@@ -74,7 +85,7 @@ async def ticket(interaction: discord.Interaction):
         title="🎟️ Welcome to your ticket!",
         description=(
             "Hello! Please wait while our team assists you.\n\n"
-            "Here are the list of premium apps we are currently providing:\n"
+            "Here are the premium apps we currently provide:\n"
             "• Spotify\n• YouTube\n• Kinemaster\n• Hotstar\n• Truecaller\n• Castle\n\n"
             "_More apps will come soon!_"
         ),
@@ -84,31 +95,55 @@ async def ticket(interaction: discord.Interaction):
     await channel.send(content=f"{user.mention}", embed=embed)
     await interaction.response.send_message(f"✅ Your ticket has been created: {channel.mention}", ephemeral=True)
 
-# ---- Message Listener ----
+# ---- Listen for App Names ----
 @bot.event
 async def on_message(message):
     if message.author.bot:
         return
 
     if message.channel.id in tickets:
-        apps = ["spotify", "youtube", "kinemaster", "hotstar", "truecaller", "castle"]
         msg_content = message.content.lower()
-        for app in apps:
-            if app in msg_content:
+        for app_name in apps_data.keys():
+            if app_name.lower() in msg_content:
                 embed = discord.Embed(
-                    title="✅ Verification Required",
+                    title="🔐 Verification Required",
                     description=(
-                        "You have to first **verify** to get your app.\n\n"
-                        "**Step 1:** Subscribe to our channel.\n"
-                        "**Step 2:** Send a screenshot here for verification.\n\n"
-                        "Once verified, you'll get your download link!"
+                        f"To get your **{app_name.capitalize()}** app link:\n\n"
+                        f"👉 First, [**Subscribe to our YouTube channel**]({YOUTUBE_CHANNEL_URL})\n"
+                        "📸 Then, **send a screenshot** of your subscription in this ticket.\n\n"
+                        "Once verified by staff, you'll receive your app link!"
                     ),
                     color=discord.Color.blue()
                 )
                 await message.channel.send(embed=embed)
                 break
 
-# ---- Close Ticket Button ----
+    await bot.process_commands(message)
+
+# ---- Admin Command: Send App Link ----
+@bot.tree.command(name="send_app", description="Send the verified app link to a user (Admin only).")
+@app_commands.describe(user="User to send the app link to", app_name="Name of the app")
+async def send_app(interaction: discord.Interaction, user: discord.User, app_name: str):
+    if not interaction.user.guild_permissions.manage_messages:
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+
+    app_name = app_name.lower()
+    if app_name not in apps_data:
+        await interaction.response.send_message(f"❌ App `{app_name}` not found in apps.json.", ephemeral=True)
+        return
+
+    app_link = apps_data[app_name]
+
+    embed = discord.Embed(
+        title=f"🎉 Here’s your {app_name.capitalize()} download link!",
+        description=f"[Click here to download]({app_link})\n\nThank you for verifying!",
+        color=discord.Color.green()
+    )
+    await user.send(embed=embed)
+    await interaction.response.send_message(f"✅ Sent **{app_name.capitalize()}** link to {user.mention}", ephemeral=True)
+
+# ---- Transcript + Close Ticket ----
 class CloseTicketButton(discord.ui.View):
     def __init__(self, user):
         super().__init__(timeout=None)
@@ -131,38 +166,17 @@ class CloseTicketButton(discord.ui.View):
         await interaction.response.send_message("✅ Ticket closed. Transcript saved!", ephemeral=True)
         await interaction.channel.delete()
 
-# ---- Admin Commands ----
-@bot.tree.command(name="remove_cooldown", description="Remove cooldown for a user (Admin only).")
-@app_commands.describe(user="User to remove cooldown for")
-async def remove_cooldown(interaction: discord.Interaction, user: discord.User):
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ You don’t have permission.", ephemeral=True)
-        return
-
-    if user.id in cooldowns:
-        del cooldowns[user.id]
-        await interaction.response.send_message(f"✅ Cooldown removed for {user.mention}", ephemeral=True)
-    else:
-        await interaction.response.send_message(f"ℹ️ {user.mention} has no cooldown.", ephemeral=True)
-
-@bot.tree.command(name="view_tickets", description="View all open tickets (Admin only).")
-async def view_tickets(interaction: discord.Interaction):
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ You don’t have permission.", ephemeral=True)
-        return
-
-    if not tickets:
-        await interaction.response.send_message("📭 No open tickets right now.", ephemeral=True)
-    else:
-        msg = "\n".join([f"<#{ch}> — <@{uid}>" for ch, uid in tickets.items()])
-        await interaction.response.send_message(f"🎟️ **Open Tickets:**\n{msg}", ephemeral=True)
-
-# ---- Bot Ready ----
+# ---- Bot Events ----
 @bot.event
 async def on_ready():
-    print(f"✅ Logged in as {bot.user}")
-    await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
-    print("✅ Slash commands synced.")
+    await asyncio.sleep(2)
+    try:
+        await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
+        print("✅ Slash commands synced to guild.")
+    except Exception as e:
+        print(f"⚠️ Command sync error: {e}")
+
+    print(f"🤖 Logged in as {bot.user}")
 
 # ---- Run Flask + Bot ----
 threading.Thread(target=run_flask).start()
