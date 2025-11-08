@@ -30,9 +30,9 @@ intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 cooldowns = {}
-tickets = {}  # {channel_id: {"user_id": int, "created_at": datetime, "last_active": datetime}}
+tickets = {}
 
-# ------------------ FLASK ------------------
+# ------------------ FLASK KEEPALIVE ------------------
 app = Flask(__name__)
 @app.route("/")
 def home():
@@ -49,27 +49,23 @@ def cooldown_expired(user_id: int):
 
 async def create_transcript_embed(channel: discord.TextChannel, user: discord.User, created_at: datetime.datetime):
     messages = [msg async for msg in channel.history(limit=100, oldest_first=True)]
-    total_messages = len(messages)
     transcript_text = ""
     for msg in messages:
-        clean = msg.content.replace("`", "'")
-        transcript_text += f"**{msg.author.display_name}:** {clean}\n"
+        transcript_text += f"**{msg.author.display_name}:** {msg.content}\n"
     if len(transcript_text) > 4000:
         transcript_text = transcript_text[-4000:]
     closed_at = datetime.datetime.utcnow()
     duration = closed_at - created_at
-    duration_str = str(datetime.timedelta(seconds=int(duration.total_seconds())))
     embed = discord.Embed(
         title=f"📜 Ticket Transcript — {channel.name}",
         color=discord.Color.gold(),
         timestamp=closed_at
     )
-    embed.add_field(name="👤 Ticket Owner", value=f"{user.mention}\n(ID: `{user.id}`)", inline=False)
+    embed.add_field(name="👤 Ticket Owner", value=f"{user.mention}", inline=False)
     embed.add_field(name="🕒 Opened", value=created_at.strftime('%Y-%m-%d %H:%M:%S UTC'), inline=True)
     embed.add_field(name="🔒 Closed", value=closed_at.strftime('%Y-%m-%d %H:%M:%S UTC'), inline=True)
-    embed.add_field(name="💬 Messages", value=f"{total_messages} total", inline=True)
-    embed.add_field(name="🧾 Conversation Summary", value=transcript_text or "_(No messages found)_", inline=False)
-    embed.set_footer(text=f"Ticket Duration: {duration_str} | Powered by Your Server")
+    embed.add_field(name="💬 Transcript", value=transcript_text or "_(No messages found)_", inline=False)
+    embed.set_footer(text="Ticket archived | Support Bot")
     return embed
 
 async def auto_close_ticket(channel: discord.TextChannel):
@@ -82,7 +78,7 @@ async def auto_close_ticket(channel: discord.TextChannel):
         elapsed = (datetime.datetime.utcnow() - last_active).total_seconds()
         if elapsed >= 600:  # 10 minutes inactivity
             user = channel.guild.get_member(info["user_id"])
-            await channel.send("⚠️ This ticket has been inactive for 10 minutes and will close automatically in 5 seconds.")
+            await channel.send("⚠️ This ticket has been inactive for 10 minutes. Closing in 5 seconds...")
             await asyncio.sleep(5)
             embed_transcript = await create_transcript_embed(channel, user, info["created_at"])
             log_channel = bot.get_channel(TICKET_LOG_CHANNEL_ID)
@@ -114,7 +110,6 @@ async def ticket(interaction: discord.Interaction):
     cooldowns[user.id] = datetime.datetime.utcnow()
     tickets[channel.id] = {"user_id": user.id, "created_at": datetime.datetime.utcnow(), "last_active": datetime.datetime.utcnow()}
 
-    # Enhanced Embed
     embed = discord.Embed(
         title="💫✨ Premium App Ticket Created ✨💫",
         description=(
@@ -127,7 +122,7 @@ async def ticket(interaction: discord.Interaction):
         color=discord.Color.green(),
         timestamp=datetime.datetime.utcnow()
     )
-    embed.set_footer(text="Ticket Support System | Powered by Your Server")
+    embed.set_footer(text="Ticket Support | Powered by Your Server")
     await channel.send(content=f"{user.mention}", embed=embed)
     await interaction.response.send_message(f"✅ Ticket created: {channel.mention}", ephemeral=True)
     asyncio.create_task(auto_close_ticket(channel))
@@ -179,13 +174,9 @@ async def send_app(interaction: discord.Interaction, user: discord.User, app_nam
         timestamp=datetime.datetime.utcnow()
     )
     embed.set_footer(text="App Distribution | Verified User")
-    try:
-        await user.send(embed=embed)
-        await interaction.response.send_message(f"✅ Sent {app_name.capitalize()} link to {user.mention}", ephemeral=True)
-        view = CloseTicketButton(user)
-        await interaction.channel.send(content=f"{user.mention}, your app link is ready!", embed=embed, view=view)
-    except discord.Forbidden:
-        await interaction.response.send_message(f"⚠️ Cannot DM {user.mention}", ephemeral=True)
+    view = CloseTicketButton(user)
+    await interaction.channel.send(content=f"{user.mention}, your app link is ready!", embed=embed, view=view)
+    await interaction.response.send_message(f"✅ Sent {app_name.capitalize()} link to {user.mention}", ephemeral=True)
 
 # ------------------ ADMIN TOOLS ------------------
 @bot.tree.command(name="remove_cooldown", description="Remove a user's cooldown (Admin only)")
@@ -194,11 +185,8 @@ async def remove_cooldown(interaction: discord.Interaction, user: discord.User):
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("❌ Admin only.", ephemeral=True)
         return
-    if user.id in cooldowns:
-        del cooldowns[user.id]
-        await interaction.response.send_message(f"✅ Cooldown removed for {user.mention}", ephemeral=True)
-    else:
-        await interaction.response.send_message(f"ℹ️ {user.mention} has no cooldown.", ephemeral=True)
+    cooldowns.pop(user.id, None)
+    await interaction.response.send_message(f"✅ Cooldown removed for {user.mention}", ephemeral=True)
 
 @bot.tree.command(name="view_tickets", description="View open tickets (Admin only)")
 async def view_tickets(interaction: discord.Interaction):
@@ -211,24 +199,6 @@ async def view_tickets(interaction: discord.Interaction):
         msg = "\n".join([f"<#{cid}> — <@{info['user_id']}>" for cid, info in tickets.items()])
         await interaction.response.send_message(f"🎟️ Open Tickets:\n{msg}", ephemeral=True)
 
-@bot.tree.command(name="force_close", description="Force close a ticket (Admin only)")
-@app_commands.describe(channel="Channel to close")
-async def force_close(interaction: discord.Interaction, channel: discord.TextChannel):
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ Admin only.", ephemeral=True)
-        return
-    if channel.id not in tickets:
-        await interaction.response.send_message("❌ Not a ticket channel.", ephemeral=True)
-        return
-    info = tickets.pop(channel.id)
-    user = channel.guild.get_member(info["user_id"])
-    embed_transcript = await create_transcript_embed(channel, user, info["created_at"])
-    log_channel = bot.get_channel(TICKET_LOG_CHANNEL_ID)
-    if log_channel:
-        await log_channel.send(embed=embed_transcript)
-    await channel.delete()
-    await interaction.response.send_message(f"✅ Ticket {channel.name} closed.", ephemeral=True)
-
 @bot.tree.command(name="ticket_stats", description="View ticket statistics (Admin only)")
 async def ticket_stats(interaction: discord.Interaction):
     if not interaction.user.guild_permissions.administrator:
@@ -236,7 +206,58 @@ async def ticket_stats(interaction: discord.Interaction):
         return
     total_open = len(tickets)
     total_users = len(set(info['user_id'] for info in tickets.values()))
-    await interaction.response.send_message(f"📊 Tickets Stats:\nOpen Tickets: {total_open}\nUsers with tickets: {total_users}", ephemeral=True)
+    await interaction.response.send_message(f"📊 Ticket Stats:\nOpen: {total_open}\nUsers: {total_users}", ephemeral=True)
+
+# ------------------ FORCE CLOSE (With Confirmation) ------------------
+class ConfirmForceCloseView(discord.ui.View):
+    def __init__(self, channel, user):
+        super().__init__(timeout=30)
+        self.channel = channel
+        self.user = user
+
+    @discord.ui.button(label="✅ Confirm", style=discord.ButtonStyle.green)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user != self.user:
+            await interaction.response.send_message("❌ Only the admin who issued the command can confirm.", ephemeral=True)
+            return
+        await interaction.response.send_message("🕒 Closing ticket in 3 seconds...", ephemeral=True)
+        await asyncio.sleep(3)
+        info = tickets.pop(self.channel.id, None)
+        if info:
+            user = self.channel.guild.get_member(info["user_id"])
+            embed_transcript = await create_transcript_embed(self.channel, user, info["created_at"])
+            log_channel = self.channel.guild.get_channel(TICKET_LOG_CHANNEL_ID)
+            if log_channel:
+                await log_channel.send(embed=embed_transcript)
+        await self.channel.delete()
+
+    @discord.ui.button(label="❌ Cancel", style=discord.ButtonStyle.red)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user != self.user:
+            await interaction.response.send_message("❌ Only the admin who issued the command can cancel.", ephemeral=True)
+            return
+        await interaction.response.send_message("✅ Force-close canceled.", ephemeral=True)
+        self.stop()
+
+@bot.tree.command(name="force_close", description="Force close the current or mentioned ticket (Admin only)")
+@app_commands.describe(channel="(Optional) Ticket channel to close")
+async def force_close(interaction: discord.Interaction, channel: discord.TextChannel = None):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+        return
+    channel = channel or interaction.channel
+    if channel.id not in tickets:
+        await interaction.response.send_message("⚠️ This is not a valid ticket channel.", ephemeral=True)
+        return
+    embed = discord.Embed(
+        title="⚠️ Confirm Ticket Closure",
+        description=f"Are you sure you want to **force close** `{channel.name}`?\n\nThis will delete the channel and archive the transcript to the ticket log.",
+        color=discord.Color.red(),
+        timestamp=datetime.datetime.utcnow()
+    )
+    embed.set_footer(text="Admin Confirmation Required | Auto-cancels in 30s")
+    view = ConfirmForceCloseView(channel, interaction.user)
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 # ------------------ CLOSE BUTTON ------------------
 class CloseTicketButton(discord.ui.View):
@@ -252,12 +273,8 @@ class CloseTicketButton(discord.ui.View):
         await interaction.response.send_message("🕒 Closing ticket in 5 seconds...", ephemeral=True)
         await asyncio.sleep(5)
         info = tickets.pop(interaction.channel.id, None)
-        if info:
-            user = interaction.guild.get_member(info["user_id"])
-            created_at = info["created_at"]
-        else:
-            user = interaction.user
-            created_at = datetime.datetime.utcnow()
+        user = interaction.guild.get_member(info["user_id"]) if info else interaction.user
+        created_at = info["created_at"] if info else datetime.datetime.utcnow()
         embed_transcript = await create_transcript_embed(interaction.channel, user, created_at)
         log_channel = bot.get_channel(TICKET_LOG_CHANNEL_ID)
         if log_channel:
@@ -267,13 +284,9 @@ class CloseTicketButton(discord.ui.View):
 # ------------------ READY ------------------
 @bot.event
 async def on_ready():
-    await asyncio.sleep(3)
-    try:
-        await bot.tree.sync()
-        print("✅ Slash commands synced globally.")
-    except Exception as e:
-        print(f"⚠️ Command sync error: {e}")
+    await bot.tree.sync()
     print(f"🤖 Logged in as {bot.user}")
+    print("✅ Slash commands synced.")
 
 # ------------------ RUN ------------------
 threading.Thread(target=run_flask).start()
