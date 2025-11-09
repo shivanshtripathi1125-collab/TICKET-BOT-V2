@@ -26,7 +26,7 @@ tree = bot.tree
 cooldowns = {}
 apps_file = "apps.json"
 
-# ====== HELPER FUNCTIONS ======
+# ====== HELPERS ======
 def load_apps():
     if not os.path.exists(apps_file):
         with open(apps_file, "w") as f:
@@ -43,6 +43,39 @@ def create_embed(title, description, color=0x2b2d31):
     embed.set_footer(text="Rash Tech • Premium App System", icon_url="https://i.imgur.com/ZLJYp9J.png")
     embed.timestamp = datetime.utcnow()
     return embed
+
+# ====== TICKET CREATION FUNCTION ======
+async def create_ticket_channel(user: discord.Member, guild: discord.Guild):
+    now = datetime.utcnow()
+    if user.id in cooldowns and now - cooldowns[user.id] < timedelta(hours=24):
+        return None, "⏳ You can only create one ticket every 24 hours."
+
+    cooldowns[user.id] = now
+    category = guild.get_channel(TICKET_CATEGORY_ID)
+    channel = await category.create_text_channel(
+        name=f"ticket-{user.name}",
+        topic=f"user_id:{user.id}",
+        overwrites={
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            user: discord.PermissionOverwrite(view_channel=True, send_messages=True)
+        }
+    )
+
+    # Welcome & verification messages
+    await channel.send(embed=create_embed(
+        "🎉 Welcome to Your Ticket!",
+        f"Hey {user.mention}, welcome!\nHere are the premium apps we currently provide:\n\n"
+        "• Spotify\n• YouTube\n• Kinemaster\n• Hotstar\n• Truecaller\n• Castle\n\n"
+        "Type the name of any app to begin verification."
+    ))
+
+    await channel.send(embed=create_embed(
+        "🔐 Verification Required",
+        f"Please **subscribe** to our YouTube channel first:\n[{YOUTUBE_URL}]({YOUTUBE_URL})\n\n"
+        "After subscribing, send a **screenshot** in this ticket. Once verified, you'll get your app link."
+    ))
+
+    return channel, None
 
 # ====== SATISFACTION VIEW ======
 class SatisfactionView(View):
@@ -80,7 +113,6 @@ async def process_verification_image(message):
             f"{user.mention}, verification successful!\nHere’s your app download link 👇",
             0x00ff99
         ))
-        # Send the first app as example (can extend for multiple)
         if apps:
             app_name, app_link = list(apps.items())[0]
             await message.channel.send(embed=create_embed(f"🎁 {app_name} Download Link", app_link, 0x00ff99))
@@ -133,38 +165,10 @@ class CreateTicketView(View):
 
     @discord.ui.button(label="🎫 Create Ticket", style=discord.ButtonStyle.blurple, emoji="✅")
     async def create_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        user = interaction.user
-        now = datetime.utcnow()
-
-        if user.id in cooldowns and now - cooldowns[user.id] < timedelta(hours=24):
-            return await interaction.response.send_message("⏳ You can only create one ticket every 24 hours.", ephemeral=True)
-
-        cooldowns[user.id] = now
-
-        category = interaction.guild.get_channel(TICKET_CATEGORY_ID)
-        channel = await category.create_text_channel(
-            name=f"ticket-{user.name}",
-            topic=f"user_id:{user.id}",
-            overwrites={
-                interaction.guild.default_role: discord.PermissionOverwrite(view_channel=False),
-                user: discord.PermissionOverwrite(view_channel=True, send_messages=True)
-            }
-        )
-
+        channel, error = await create_ticket_channel(interaction.user, interaction.guild)
+        if error:
+            return await interaction.response.send_message(error, ephemeral=True)
         await interaction.response.send_message(f"🎟️ Ticket created: {channel.mention}", ephemeral=True)
-
-        await channel.send(embed=create_embed(
-            "🎉 Welcome to Your Ticket!",
-            f"Hey {user.mention}, welcome!\nHere are the premium apps we currently provide:\n\n"
-            "• Spotify\n• YouTube\n• Kinemaster\n• Hotstar\n• Truecaller\n• Castle\n\n"
-            "Type the name of any app to begin verification."
-        ))
-
-        await channel.send(embed=create_embed(
-            "🔐 Verification Required",
-            f"Please **subscribe** to our YouTube channel first:\n[{YOUTUBE_URL}]({YOUTUBE_URL})\n\n"
-            "After subscribing, send a **screenshot** in this ticket. Once verified, you'll get your app link."
-        ))
 
 # ====== BOT EVENTS ======
 @bot.event
@@ -173,7 +177,7 @@ async def on_ready():
     guild = discord.Object(id=GUILD_ID)
     await tree.sync(guild=guild)
 
-    # Delete old message and resend panel
+    # Delete old panel message and resend
     channel = bot.get_channel(TICKET_COMMAND_CHANNEL_ID)
     async for msg in channel.history(limit=10):
         if msg.author == bot.user:
@@ -192,6 +196,13 @@ async def on_message(message):
     await bot.process_commands(message)
 
 # ====== COMMANDS ======
+@tree.command(name="ticket", description="Create a new ticket")
+async def ticket_command(interaction: discord.Interaction):
+    channel, error = await create_ticket_channel(interaction.user, interaction.guild)
+    if error:
+        return await interaction.response.send_message(error, ephemeral=True)
+    await interaction.response.send_message(f"🎟️ Ticket created: {channel.mention}", ephemeral=True)
+
 @tree.command(name="add_app", description="Add a new premium app.")
 @app_commands.describe(app_name="App name", app_link="App link")
 async def add_app(interaction: discord.Interaction, app_name: str, app_link: str):
