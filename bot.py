@@ -7,11 +7,7 @@ import os
 from flask import Flask
 from threading import Thread
 from dotenv import load_dotenv
-import pytesseract
-from PIL import Image
-import io
-import aiohttp
-import re
+import json
 
 load_dotenv()
 
@@ -23,6 +19,8 @@ TICKET_COMMAND_CHANNEL_ID = 1431633723467501769
 TICKET_LOG_CHANNEL_ID = 1434241829733404692
 COOLDOWN_HOURS = 24
 
+APPS_FILE = "apps.json"
+
 # -------------------- DISCORD SETUP --------------------
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -30,6 +28,13 @@ tickets = {}
 user_cooldowns = {}
 banned_users = set()
 last_requested_app = {}
+
+# Load apps from file
+if os.path.exists(APPS_FILE):
+    with open(APPS_FILE, "r") as f:
+        apps_dict = json.load(f)
+else:
+    apps_dict = {}  # format: {"spotify": "link", "youtube": "link", ...}
 
 # -------------------- FLASK KEEPALIVE --------------------
 app = Flask(__name__)
@@ -147,9 +152,9 @@ async def handle_ticket_creation(interaction: discord.Interaction):
         description=(
             f"Hello {user.mention} 👋\n\n"
             "Welcome to your personal ticket.\n\n"
-            "💠 **Available Apps:**\n"
-            "Spotify 🎵\nYouTube ▶️\nKinemaster 🎬\nHotstar 🍿\nTruecaller 📞\nCastle 🏰\n\n"
-            "💬 Type the app name below to start verification!"
+            f"💠 **Available Apps:**\n" +
+            "\n".join([f"{app.capitalize()} 🎁" for app in apps_dict.keys()]) +
+            "\n\n💬 Type the app name below to get your app link!"
         ),
         color=discord.Color.green(),
         timestamp=datetime.datetime.utcnow()
@@ -171,16 +176,43 @@ async def send_app(interaction: discord.Interaction, app_name: str):
         await interaction.response.send_message("❌ Only admins can send app links.", ephemeral=True)
         return
 
+    # Case-insensitive search for the app
+    app_key = None
+    for key in apps_dict.keys():
+        if key.lower() == app_name.lower():
+            app_key = key
+            break
+
+    if not app_key:
+        await interaction.response.send_message(f"⚠️ No link found for **{app_name}**. Please add it using /addapp first.", ephemeral=True)
+        return
+
+    link = apps_dict[app_key]
+
     embed = discord.Embed(
-        title=f"🎁 Your Premium App: {app_name.capitalize()}",
-        description="Here is your app link! Thank you for verifying ❤️\n\nIf you're satisfied, please close this ticket.",
+        title=f"🎁 Your Premium App: {app_key.capitalize()}",
+        description=f"Here is your app link: {link}\n\nThank you! ❤️\nPlease close this ticket when done.",
         color=discord.Color.blurple(),
         timestamp=datetime.datetime.utcnow()
     )
     embed.set_footer(text="Premium Delivery | Rash Tech")
 
     await interaction.channel.send(embed=embed, view=CloseTicketView())
-    await interaction.response.send_message("✅ App link sent successfully.", ephemeral=True)
+    await interaction.response.send_message(f"✅ App link for **{app_key.capitalize()}** sent successfully.", ephemeral=True)
+
+@bot.tree.command(name="addapp", description="Add a new app with its download link (Admin only)")
+@app_commands.describe(app_name="Name of the app", app_link="Download link for the app")
+async def addapp(interaction: discord.Interaction, app_name: str, app_link: str):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ Only admins can add apps.", ephemeral=True)
+        return
+
+    apps_dict[app_name] = app_link
+    # Save to file
+    with open(APPS_FILE, "w") as f:
+        json.dump(apps_dict, f, indent=4)
+
+    await interaction.response.send_message(f"✅ App **{app_name}** added successfully with link.", ephemeral=True)
 
 @bot.tree.command(name="force_close", description="Force close the current or mentioned ticket (Admin only)")
 @app_commands.describe(channel="(Optional) Ticket channel to close")
@@ -217,37 +249,6 @@ async def remove_cooldown(interaction: discord.Interaction, user: discord.Member
     else:
         await interaction.response.send_message(f"⚠️ {user.mention} does not have an active cooldown.", ephemeral=True)
 
-# -------------------- OCR SCREENSHOT VERIFICATION --------------------
-VERIFICATION_KEYWORDS = ["subscribed", "rash tech"]
-
-async def verify_screenshot(message):
-    if not message.attachments:
-        return False
-
-    for attachment in message.attachments:
-        if attachment.content_type.startswith("image/"):
-            async with aiohttp.ClientSession() as session:
-                async with session.get(attachment.url) as resp:
-                    if resp.status == 200:
-                        image_bytes = await resp.read()
-                        image = Image.open(io.BytesIO(image_bytes))
-                        try:
-                            # OCR text extraction
-                            text = pytesseract.image_to_string(image)
-                            print(f"OCR Extracted Text:\n{text}")  # Debug output
-
-                            # Normalize text
-                            normalized_text = re.sub(r'[^a-z0-9 ]', '', text.lower())
-                            normalized_text = re.sub(r'\s+', ' ', normalized_text).strip()
-
-                            # Check all keywords
-                            if all(keyword.lower() in normalized_text for keyword in VERIFICATION_KEYWORDS):
-                                return True
-                        except Exception as e:
-                            print(f"OCR Error: {e}")
-                            return False
-    return False
-
 # -------------------- ON MESSAGE --------------------
 @bot.event
 async def on_message(message):
@@ -257,49 +258,20 @@ async def on_message(message):
     if message.channel.id in tickets:
         tickets[message.channel.id]["last_activity"] = datetime.datetime.utcnow()
 
-        apps = ["spotify", "youtube", "kinemaster", "hotstar", "truecaller", "castle"]
         content = message.content.lower()
 
-        # Detect app mentioned in message
-        for app in apps:
-            if app in content:
+        for app in apps_dict.keys():
+            if app.lower() in content:
                 last_requested_app[message.channel.id] = app
                 embed = discord.Embed(
-                    title="💫 Premium App Verification",
-                    description=(
-                        f"You're requesting **{app.capitalize()}**!\n\n"
-                        "Please complete the steps below:\n\n"
-                        "1️⃣ Subscribe to our YouTube channel.\n"
-                        "2️⃣ Upload a screenshot here for verification.\n"
-                        f"📺 [Subscribe here]({YOUTUBE_CHANNEL_URL})"
-                    ),
+                    title="💫 Premium App Requested",
+                    description=f"You requested **{app.capitalize()}**!\n\nAn admin will send you the download link shortly.",
                     color=discord.Color.blurple(),
                     timestamp=datetime.datetime.utcnow()
                 )
-                embed.set_footer(text="Verification | Rash Tech")
+                embed.set_footer(text="Rash Tech | Ticket System")
                 await message.channel.send(embed=embed)
                 break
-
-        # Screenshot verification
-        if message.attachments:
-            await message.channel.send("⏳ Upload received, checking for verification...")
-            verified = await verify_screenshot(message)
-            app_to_send = last_requested_app.get(message.channel.id)
-
-            if verified and app_to_send:
-                embed = discord.Embed(
-                    title=f"🎁 Your Premium App: {app_to_send.capitalize()}",
-                    description="✅ Verification complete! Here is your download link.\nThank you for verifying ❤️\n\nPlease close this ticket when done.",
-                    color=discord.Color.blurple(),
-                    timestamp=datetime.datetime.utcnow()
-                )
-                embed.set_footer(text="Premium Delivery | Rash Tech")
-                await message.channel.send(embed=embed, view=CloseTicketView())
-                last_requested_app.pop(message.channel.id, None)
-            elif verified:
-                await message.channel.send("✅ Verification complete! Here is your download link.")
-            else:
-                await message.channel.send("✅ Upload successful. Verification failed, invalid image.")
 
     await bot.process_commands(message)
 
