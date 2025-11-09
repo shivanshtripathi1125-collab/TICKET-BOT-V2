@@ -1,5 +1,5 @@
 import discord
-from discord.ext import commands, tasks
+from discord.ext import commands
 from discord import app_commands
 import asyncio
 import datetime
@@ -11,6 +11,7 @@ import pytesseract
 from PIL import Image
 import io
 import aiohttp
+import re
 
 load_dotenv()
 
@@ -28,6 +29,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 tickets = {}
 user_cooldowns = {}
 banned_users = set()
+last_requested_app = {}
 
 # -------------------- FLASK KEEPALIVE --------------------
 app = Flask(__name__)
@@ -202,7 +204,6 @@ async def force_close(interaction: discord.Interaction, channel: discord.TextCha
     view = ConfirmForceCloseView(channel, interaction.user)
     await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
-# -------------------- REMOVE COOLDOWN COMMAND --------------------
 @bot.tree.command(name="remove_cooldown", description="Remove a user's ticket cooldown (Admin only)")
 @app_commands.describe(user="User to remove cooldown")
 async def remove_cooldown(interaction: discord.Interaction, user: discord.Member):
@@ -231,12 +232,20 @@ async def verify_screenshot(message):
                         image_bytes = await resp.read()
                         image = Image.open(io.BytesIO(image_bytes))
                         try:
-                            text = pytesseract.image_to_string(image).lower()
+                            # OCR text extraction
+                            text = pytesseract.image_to_string(image)
+                            print(f"OCR Extracted Text:\n{text}")  # Debug output
+
+                            # Normalize text
+                            normalized_text = re.sub(r'[^a-z0-9 ]', '', text.lower())
+                            normalized_text = re.sub(r'\s+', ' ', normalized_text).strip()
+
+                            # Check all keywords
+                            if all(keyword.lower() in normalized_text for keyword in VERIFICATION_KEYWORDS):
+                                return True
                         except Exception as e:
                             print(f"OCR Error: {e}")
                             return False
-                        if all(keyword.lower() in text for keyword in VERIFICATION_KEYWORDS):
-                            return True
     return False
 
 # -------------------- ON MESSAGE --------------------
@@ -248,13 +257,13 @@ async def on_message(message):
     if message.channel.id in tickets:
         tickets[message.channel.id]["last_activity"] = datetime.datetime.utcnow()
 
-        # App verification detection
         apps = ["spotify", "youtube", "kinemaster", "hotstar", "truecaller", "castle"]
         content = message.content.lower()
-        requested_app = None
+
+        # Detect app mentioned in message
         for app in apps:
             if app in content:
-                requested_app = app
+                last_requested_app[message.channel.id] = app
                 embed = discord.Embed(
                     title="💫 Premium App Verification",
                     description=(
@@ -271,20 +280,22 @@ async def on_message(message):
                 await message.channel.send(embed=embed)
                 break
 
-        # Screenshot verification & auto-send app
+        # Screenshot verification
         if message.attachments:
             await message.channel.send("⏳ Upload received, checking for verification...")
             verified = await verify_screenshot(message)
+            app_to_send = last_requested_app.get(message.channel.id)
 
-            if verified and requested_app:
+            if verified and app_to_send:
                 embed = discord.Embed(
-                    title=f"🎁 Your Premium App: {requested_app.capitalize()}",
+                    title=f"🎁 Your Premium App: {app_to_send.capitalize()}",
                     description="✅ Verification complete! Here is your download link.\nThank you for verifying ❤️\n\nPlease close this ticket when done.",
                     color=discord.Color.blurple(),
                     timestamp=datetime.datetime.utcnow()
                 )
                 embed.set_footer(text="Premium Delivery | Rash Tech")
                 await message.channel.send(embed=embed, view=CloseTicketView())
+                last_requested_app.pop(message.channel.id, None)
             elif verified:
                 await message.channel.send("✅ Verification complete! Here is your download link.")
             else:
