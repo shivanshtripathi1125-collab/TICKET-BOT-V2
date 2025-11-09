@@ -183,9 +183,9 @@ async def on_message(message):
 
     # Only handle ticket channels
     if str(message.channel.name).startswith("ticket-"):
-        # Check app names (case-insensitive)
+        content_lower = message.content.lower()
         for app_name in apps.keys():
-            if app_name.lower() in message.content.lower():
+            if app_name.lower() in content_lower:
                 # Check for attachment (screenshot)
                 if message.attachments:
                     for attachment in message.attachments:
