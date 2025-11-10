@@ -1,253 +1,297 @@
 import discord
 from discord.ext import commands
-from discord import app_commands, ui
-import os, json, asyncio, datetime
+from discord import app_commands
+import os
+import datetime
+import asyncio
 from flask import Flask
 from threading import Thread
 
 # -----------------------------
-# Environment Variables
+# Flask Keep-Alive (Render)
 # -----------------------------
-TOKEN = os.getenv("DISCORD_TOKEN")
-GUILD_ID = int(os.getenv("GUILD_ID", 1424815111541096530))
-TICKET_LOG_CHANNEL_ID = int(os.getenv("TICKET_LOG_CHANNEL_ID", 1434241829733404692))
-YOUTUBE_CHANNEL_URL = os.getenv("YOUTUBE_CHANNEL_URL", "https://www.youtube.com/@RASH-TECH")
+app = Flask(__name__)
 
-# -----------------------------
-# Fixed Channel & Role IDs
-# -----------------------------
-TICKET_COUNTER_CHANNEL_ID = 1431633723467501769
-VERIFICATION_CHANNEL_ID = 1437035128802246697
-STAFF_ROLE_NAME = "Staff"
-
-# -----------------------------
-# Load Apps
-# -----------------------------
-with open("apps.json") as f:
-    apps = json.load(f)
-
-# -----------------------------
-# Load Cooldowns (Persistent)
-# -----------------------------
-COOLDOWN_FILE = "cooldowns.json"
-if os.path.exists(COOLDOWN_FILE):
-    with open(COOLDOWN_FILE) as f:
-        cooldowns = json.load(f)
-else:
-    cooldowns = {}
-
-def save_cooldowns():
-    with open(COOLDOWN_FILE, "w") as f:
-        json.dump(cooldowns, f)
-
-# -----------------------------
-# Bot Setup
-# -----------------------------
-intents = discord.Intents.all()
-bot = commands.Bot(command_prefix="/", intents=intents)
-
-# -----------------------------
-# Flask Heartbeat (Render/Heroku)
-# -----------------------------
-app = Flask("")
-
-@app.route("/")
+@app.route('/')
 def home():
-    return "RASH TECH Bot is running ✅"
+    return "RASH TECH Bot is running!"
 
-def run():
+def run_flask():
     app.run(host="0.0.0.0", port=8080)
 
-Thread(target=run).start()
+Thread(target=run_flask).start()
 
 # -----------------------------
-# Ticket Close Button
+# Discord Bot Setup
 # -----------------------------
-class CloseTicketView(ui.View):
-    def __init__(self, ticket_channel):
-        super().__init__(timeout=None)
-        self.ticket_channel = ticket_channel
+intents = discord.Intents.default()
+intents.message_content = True
+intents.members = True
 
-    @ui.button(label="Close Ticket", style=discord.ButtonStyle.red)
-    async def close_ticket(self, interaction: discord.Interaction, button: ui.Button):
-        await interaction.response.send_message(embed=discord.Embed(
-            description="🔒 Ticket will close in **5 seconds**...",
-            color=discord.Color.red()
-        ))
-        await asyncio.sleep(5)
-        messages = await self.ticket_channel.history(limit=None, oldest_first=True).flatten()
-        transcript = "\n".join([f"{m.author}: {m.content}" for m in messages if m.content])
-        log_channel = bot.get_channel(TICKET_LOG_CHANNEL_ID)
-        await log_channel.send(f"📜 Transcript for **{self.ticket_channel.name}**:\n```{transcript}```")
-        await self.ticket_channel.delete()
+bot = commands.Bot(command_prefix="!", intents=intents)
+bot.remove_command("help")
+
+# Environment Variables
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+GUILD_ID = int(os.getenv("GUILD_ID"))
+TICKET_LOG_CHANNEL_ID = int(os.getenv("TICKET_LOG_CHANNEL_ID"))
+YOUTUBE_CHANNEL_URL = os.getenv("YOUTUBE_CHANNEL_URL")
+
+# Hardcoded Channels
+TICKET_COUNTER_CHANNEL_ID = 1431633723467501769
+VERIFICATION_CHANNEL_ID = 1437035128802246697
+
+# Data stores
+user_cooldowns = {}   # {user_id: datetime}
+apps = {}             # {app_name: link}
+active_tickets = {}   # {user_id: channel_id}
+
 
 # -----------------------------
-# Verification Buttons
+# Helper Embed Function
 # -----------------------------
-class VerificationView(ui.View):
-    def __init__(self, ticket_channel, user, app_name, attachment_url):
-        super().__init__(timeout=None)
-        self.ticket_channel = ticket_channel
-        self.user = user
-        self.app_name = app_name
-        self.attachment_url = attachment_url
+def create_embed(title, desc, color=discord.Color.blurple()):
+    embed = discord.Embed(title=title, description=desc, color=color)
+    embed.set_footer(text="RASH TECH | Premium App Service ⚡")
+    return embed
 
-    @ui.button(label="✅ Verify", style=discord.ButtonStyle.green)
-    async def verify(self, interaction: discord.Interaction, button: ui.Button):
-        app_link = apps.get(self.app_name)
-        if not app_link:
-            await interaction.response.send_message("⚠️ App link not found.", ephemeral=True)
-            return
 
-        embed = discord.Embed(
-            title="Verification Approved ✅",
-            description=f"{self.user.mention}, your verification is approved!\n\n**Here is your link:** {app_link}",
-            color=discord.Color.green()
+# -----------------------------
+# Dynamic App Management
+# -----------------------------
+@bot.tree.command(name="addapp", description="➕ Add a premium app with its link")
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(name="App name", link="App link")
+async def addapp(interaction: discord.Interaction, name: str, link: str):
+    name = name.lower()
+    if name in apps:
+        await interaction.response.send_message(
+            f"⚠️ The app **{name.title()}** already exists.", ephemeral=True
         )
-        await self.ticket_channel.send(embed=embed, view=CloseTicketView(self.ticket_channel))
-        try:
-            await self.user.send(f"🎉 Here is your link for **{self.app_name}**:\n{app_link}")
-        except:
-            await self.ticket_channel.send(f"⚠️ {self.user.mention}, I couldn’t DM you. Please check your privacy settings.")
-        await interaction.response.send_message("✅ Verification completed.", ephemeral=True)
+        return
+    apps[name] = link
+    await interaction.response.send_message(
+        f"✅ **{name.title()}** added successfully with link:\n{link}", ephemeral=True
+    )
 
-    @ui.button(label="❌ Decline", style=discord.ButtonStyle.red)
-    async def decline(self, interaction: discord.Interaction, button: ui.Button):
-        await self.ticket_channel.send(embed=discord.Embed(
-            description=f"❌ Sorry {self.user.mention}, your verification for **{self.app_name}** was declined by staff.",
-            color=discord.Color.red()
-        ))
-        await interaction.response.send_message("Declined successfully.", ephemeral=True)
 
-# -----------------------------
-# Bot Ready Event
-# -----------------------------
-@bot.event
-async def on_ready():
-    print(f"✅ Logged in as {bot.user}")
-    try:
-        synced = await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
-        print(f"🔁 Synced {len(synced)} commands.")
-    except Exception as e:
-        print("❌ Sync failed:", e)
+@bot.tree.command(name="removeapp", description="❌ Remove an app from the premium list")
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(name="App name")
+async def removeapp(interaction: discord.Interaction, name: str):
+    name = name.lower()
+    if name not in apps:
+        await interaction.response.send_message(
+            f"⚠️ No app named **{name.title()}** found.", ephemeral=True
+        )
+        return
+    del apps[name]
+    await interaction.response.send_message(
+        f"🗑️ **{name.title()}** has been removed from the list.", ephemeral=True
+    )
 
-# -----------------------------
-# /ticket Command
-# -----------------------------
-@bot.tree.command(name="ticket", description="🎫 Create a support ticket")
-async def ticket(interaction: discord.Interaction):
-    user_id = str(interaction.user.id)
-    now = datetime.datetime.utcnow()
 
-    last_ticket = cooldowns.get(user_id)
-    if last_ticket:
-        last_time = datetime.datetime.fromisoformat(last_ticket)
-        delta = (now - last_time).total_seconds()
-        if delta < 48 * 3600:
-            remaining = 48 * 3600 - delta
-            hours = int(remaining // 3600)
-            minutes = int((remaining % 3600) // 60)
-            await interaction.response.send_message(embed=discord.Embed(
-                title="⏳ Cooldown Active",
-                description=f"You can create a new ticket in **{hours}h {minutes}m**.",
-                color=discord.Color.orange()
-            ), ephemeral=True)
-            return
-
-    guild = bot.get_guild(GUILD_ID)
-    overwrites = {
-        guild.default_role: discord.PermissionOverwrite(read_messages=False),
-        interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
-        discord.utils.get(guild.roles, name=STAFF_ROLE_NAME): discord.PermissionOverwrite(read_messages=True, send_messages=True)
-    }
-
-    ticket_channel = await guild.create_text_channel(f"ticket-{interaction.user.name}", overwrites=overwrites)
-    cooldowns[user_id] = now.isoformat()
-    save_cooldowns()
+@bot.tree.command(name="listapps", description="📜 View all currently available premium apps")
+async def listapps(interaction: discord.Interaction):
+    if not apps:
+        await interaction.response.send_message(
+            embed=create_embed("📭 No Apps Found", "There are currently no premium apps."),
+            ephemeral=True,
+        )
+        return
 
     embed = discord.Embed(
-        title=f"🎟️ Welcome to RASH TECH, {interaction.user.name}!",
-        description=(
-            "Thank you for creating a ticket!\n\n"
-            "📱 **Here are the premium apps we currently provide:**\n"
-            + "\n".join([f"• {a}" for a in apps.keys()]) +
-            f"\n\n📋 **To get an app link:**\n1️⃣ Type the app name (e.g., `Spotify`)\n"
-            f"2️⃣ Subscribe to our YouTube: {YOUTUBE_CHANNEL_URL}\n"
-            "3️⃣ Take a screenshot of your subscription and upload it here."
-        ),
-        color=discord.Color.blurple()
+        title="💎 Premium Apps List",
+        description="Here are all the premium apps currently available:",
+        color=discord.Color.green(),
     )
-    await ticket_channel.send(embed=embed)
-    await interaction.response.send_message(f"✅ Ticket created: {ticket_channel.mention}", ephemeral=True)
+    for app_name, app_link in sorted(apps.items()):
+        embed.add_field(name=app_name.title(), value=f"[🔗 Click Here]({app_link})", inline=False)
+
+    embed.set_footer(text="RASH TECH | More apps coming soon ⚡")
+    await interaction.response.send_message(embed=embed)
+
 
 # -----------------------------
-# Message Listener (Case-Insensitive App Detection)
+# Ticket Command
+# -----------------------------
+@bot.tree.command(name="ticket", description="🎟️ Create a support ticket")
+async def ticket(interaction: discord.Interaction):
+    user = interaction.user
+    guild = interaction.guild
+    now = datetime.datetime.utcnow()
+
+    if user.id in user_cooldowns and now - user_cooldowns[user.id] < datetime.timedelta(hours=48):
+        remaining = datetime.timedelta(hours=48) - (now - user_cooldowns[user.id])
+        await interaction.response.send_message(
+            f"⏳ You can create another ticket in **{remaining.seconds // 3600}h {(remaining.seconds // 60) % 60}m**.",
+            ephemeral=True,
+        )
+        return
+
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        user: discord.PermissionOverwrite(view_channel=True, send_messages=True, attach_files=True),
+        guild.me: discord.PermissionOverwrite(view_channel=True)
+    }
+
+    ticket_channel = await guild.create_text_channel(
+        f"ticket-{user.name}".replace(" ", "-"),
+        overwrites=overwrites,
+        reason=f"Ticket created by {user}"
+    )
+
+    user_cooldowns[user.id] = now
+    active_tickets[user.id] = ticket_channel.id
+
+    app_list_text = "\n".join([f"💠 **{a.title()}**" for a in apps.keys()]) if apps else "No apps available yet."
+
+    embed = discord.Embed(
+        title=f"🎫 Welcome to RASH TECH, {user.display_name}!",
+        description=(
+            "Thank you for reaching out to **RASH TECH Support** 💬\n\n"
+            "Please follow these steps to get your premium app link:\n"
+            "1️⃣ Go to our YouTube channel and **Subscribe**: "
+            f"[RASH TECH]({YOUTUBE_CHANNEL_URL})\n"
+            "2️⃣ Take a **screenshot** of your subscription.\n"
+            "3️⃣ Upload the screenshot **here in this ticket**.\n\n"
+            "Once verified by admin, you’ll receive your app link directly in DM. 💎\n\n"
+            f"**Available Premium Apps:**\n{app_list_text}"
+        ),
+        color=discord.Color.green()
+    )
+
+    await ticket_channel.send(embed=embed)
+    await interaction.response.send_message(
+        f"✅ Your ticket has been created: {ticket_channel.mention}", ephemeral=True
+    )
+
+
+# -----------------------------
+# Handle Screenshot Upload
 # -----------------------------
 @bot.event
 async def on_message(message):
     if message.author.bot:
         return
 
-    if str(message.channel.name).startswith("ticket-"):
-        content_lower = message.content.lower()
+    if message.channel.id not in active_tickets.values():
+        return
 
-        for app_name, link in apps.items():
-            if app_name.lower() in content_lower:
-                # If screenshot provided
-                if message.attachments:
-                    for attachment in message.attachments:
-                        ver_channel = bot.get_channel(VERIFICATION_CHANNEL_ID)
-                        embed = discord.Embed(
-                            title="🕵️ New Verification Request",
-                            description=(
-                                f"👤 **User:** {message.author}\n"
-                                f"📦 **App:** {app_name}\n\nScreenshot below ⬇️"
-                            ),
-                            color=discord.Color.yellow()
-                        )
-                        embed.set_image(url=attachment.url)
-                        await ver_channel.send(embed=embed, view=VerificationView(message.channel, message.author, app_name, attachment.url))
-                        await message.channel.send(embed=discord.Embed(
-                            description="✅ Screenshot uploaded successfully! Please wait for admin verification.",
-                            color=discord.Color.green()
-                        ))
-                else:
-                    await message.channel.send(embed=discord.Embed(
-                        description=f"📸 Please upload a screenshot showing you subscribed to our YouTube for **{app_name}**.",
-                        color=discord.Color.orange()
-                    ))
-                return
+    user = message.author
+    guild = message.guild
+    channel = message.channel
+
+    # If the message contains an attachment (screenshot)
+    if message.attachments:
+        verification_channel = guild.get_channel(VERIFICATION_CHANNEL_ID)
+        if not verification_channel:
+            await channel.send("⚠️ Verification channel not found. Please contact admin.")
+            return
+
+        last_user_message = None
+        async for msg in channel.history(limit=10):
+            if msg.author == user and not msg.attachments:
+                last_user_message = msg.content.lower().strip()
+                break
+
+        app_name = last_user_message.lower() if last_user_message else None
+        if app_name not in apps:
+            await channel.send(embed=create_embed(
+                "⚠️ Invalid App Name",
+                "Please type the app name (e.g., Spotify, Youtube) before sending your screenshot.",
+                discord.Color.red()
+            ))
+            return
+
+        file = await message.attachments[0].to_file()
+        embed = discord.Embed(
+            title="🧾 New Verification Request",
+            description=f"👤 **User:** {user.mention}\n📱 **App:** {app_name.title()}",
+            color=discord.Color.orange()
+        )
+        embed.set_image(url=message.attachments[0].url)
+
+        verify_btn = discord.ui.Button(label="✅ Verify", style=discord.ButtonStyle.success)
+        decline_btn = discord.ui.Button(label="❌ Decline", style=discord.ButtonStyle.danger)
+        view = discord.ui.View()
+
+        async def verify_callback(interaction_btn: discord.Interaction):
+            await interaction_btn.response.send_message(
+                f"✅ Verified **{user.display_name}** for **{app_name.title()}**.", ephemeral=False
+            )
+            await channel.send(embed=create_embed(
+                "✅ Verification Approved",
+                "Your verification has been approved! Check your DMs for the app link 💎",
+                discord.Color.green())
+            )
+            try:
+                await user.send(f"🎉 Here is your **{app_name.title()}** link: {apps[app_name]}")
+            except:
+                await channel.send("⚠️ Unable to send DM. Please check your privacy settings.")
+
+        async def decline_callback(interaction_btn: discord.Interaction):
+            await interaction_btn.response.send_message(
+                f"❌ Verification declined for **{user.display_name}**.", ephemeral=False
+            )
+            await channel.send(embed=create_embed(
+                "❌ Verification Declined",
+                "Your screenshot was declined by the admin. Please try again.",
+                discord.Color.red())
+            )
+
+        verify_btn.callback = verify_callback
+        decline_btn.callback = decline_callback
+        view.add_item(verify_btn)
+        view.add_item(decline_btn)
+
+        await verification_channel.send(embed=embed, view=view)
+        await channel.send(embed=create_embed(
+            "📸 Upload Successful",
+            "Please wait while the admin verifies your screenshot."
+        ))
+
 
 # -----------------------------
-# /remove_cooldown Command
+# Admin Commands
 # -----------------------------
 @bot.tree.command(name="remove_cooldown", description="🧹 Remove a user's ticket cooldown")
+@app_commands.checks.has_permissions(manage_channels=True)
 @app_commands.describe(user="User to remove cooldown for")
-async def remove_cooldown(interaction: discord.Interaction, user: discord.User):
-    if not discord.utils.get(interaction.user.roles, name=STAFF_ROLE_NAME):
-        await interaction.response.send_message("❌ You don’t have permission.", ephemeral=True)
+async def remove_cooldown(interaction: discord.Interaction, user: discord.Member):
+    if user.id in user_cooldowns:
+        del user_cooldowns[user.id]
+        await interaction.response.send_message(f"✅ Cooldown removed for {user.mention}", ephemeral=True)
+    else:
+        await interaction.response.send_message(f"⚠️ {user.mention} has no active cooldown.", ephemeral=True)
+
+
+@bot.tree.command(name="force_close", description="🔒 Force close a user's ticket")
+@app_commands.checks.has_permissions(manage_channels=True)
+@app_commands.describe(user="User whose ticket you want to close")
+async def force_close(interaction: discord.Interaction, user: discord.Member):
+    if user.id not in active_tickets:
+        await interaction.response.send_message("⚠️ No active ticket found for that user.", ephemeral=True)
         return
-    cooldowns.pop(str(user.id), None)
-    save_cooldowns()
-    await interaction.response.send_message(f"✅ Cooldown removed for {user.mention}.", ephemeral=True)
+
+    channel_id = active_tickets[user.id]
+    channel = bot.get_channel(channel_id)
+    if channel:
+        await channel.delete(reason="Force closed by admin")
+        del active_tickets[user.id]
+        await interaction.response.send_message(f"✅ Ticket closed for {user.mention}", ephemeral=True)
+
 
 # -----------------------------
-# /force_close Command
+# On Ready
 # -----------------------------
-@bot.tree.command(name="force_close", description="🔒 Force close a ticket manually")
-@app_commands.describe(channel="Ticket channel to close")
-async def force_close(interaction: discord.Interaction, channel: discord.TextChannel):
-    if not discord.utils.get(interaction.user.roles, name=STAFF_ROLE_NAME):
-        await interaction.response.send_message("❌ You don’t have permission.", ephemeral=True)
-        return
-    messages = await channel.history(limit=None, oldest_first=True).flatten()
-    transcript = "\n".join([f"{m.author}: {m.content}" for m in messages if m.content])
-    log_channel = bot.get_channel(TICKET_LOG_CHANNEL_ID)
-    await log_channel.send(f"🧾 Transcript for {channel.name}:\n```{transcript}```")
-    await channel.delete()
-    await interaction.response.send_message(f"✅ Ticket **{channel.name}** closed successfully.", ephemeral=True)
+@bot.event
+async def on_ready():
+    await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
+    print(f"✅ Logged in as {bot.user}")
+
 
 # -----------------------------
 # Run Bot
 # -----------------------------
-bot.run(TOKEN)
+bot.run(DISCORD_TOKEN)
